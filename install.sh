@@ -1,5 +1,6 @@
 #!/bin/sh
-# Installs monitor-agent as a systemd or OpenRC service.
+# Installs monitor-agent as a systemd or OpenRC service, or as a launchd agent
+# on macOS.
 #   curl -fsSL https://hub.example.com/install.sh | sh -s -- --server URL --token TOKEN [options]
 #   curl -fsSL https://hub.example.com/install.sh | sh -s -- --server URL --register KEY [options]
 #   curl -fsSL https://hub.example.com/install.sh | sh -s -- --upgrade
@@ -10,14 +11,32 @@ set -eu
 # is set, and Debian does not set it.
 PATH="$PATH:/usr/sbin:/sbin"
 
+# The system this installer is running on. macOS runs the agent under launchd
+# as the user who installs it, and everything else runs it as a system user
+# under systemd or OpenRC; the two need different directories, different
+# service definitions and different rights, so the whole of one path is
+# decided here rather than interleaved.
+OS=$(uname -s)
+
 # Binary and token in one directory, the same one the hub uses, giving a node a
-# single path to inspect and a single path to remove.
-ROOT="/opt/monitor"
-BIN="$ROOT/monitor-agent"
-ENV_FILE="$ROOT/agent.env"
-UNIT_FILE="/etc/systemd/system/monitor-agent.service"
-RC_FILE="/etc/init.d/monitor-agent"
-LOG_FILE="/var/log/monitor-agent.log"
+# single path to inspect and a single path to remove. On macOS the agent runs
+# as the user, so the directory is that user's home rather than /opt, which
+# needs root and a service user nobody logs in as.
+if [ "$OS" = Darwin ]; then
+	ROOT="$HOME/monitor-agent"
+	BIN="$ROOT/monitor-agent"
+	ENV_FILE="$ROOT/agent.env"
+	UNIT_FILE="$HOME/Library/LaunchAgents/com.monitor.agent.plist"
+	RC_FILE=""
+	LOG_FILE="$HOME/Library/Logs/monitor-agent.log"
+else
+	ROOT="/opt/monitor"
+	BIN="$ROOT/monitor-agent"
+	ENV_FILE="$ROOT/agent.env"
+	UNIT_FILE="/etc/systemd/system/monitor-agent.service"
+	RC_FILE="/etc/init.d/monitor-agent"
+	LOG_FILE="/var/log/monitor-agent.log"
+fi
 SERVER=""
 TOKEN=""
 REGISTER=""
@@ -52,7 +71,14 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+# The Linux path installs a system service, which needs root. The macOS path
+# installs a launchd agent for the user running the script, which must not need
+# root: a user pasting the command into their own terminal should not have to
+# type a password, and a sudo'd shell would install the agent for root rather
+# than for them.
+if [ "$OS" != Darwin ]; then
+	[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+fi
 
 # Removes exactly what an install writes and nothing else, for both init
 # systems: the one present now need not be the one the install found, and
@@ -61,11 +87,22 @@ done
 # hub may be installed in $ROOT as well, so the directory is removed only once
 # empty.
 if [ -n "$UNINSTALL" ]; then
+	if [ "$OS" = Darwin ]; then
+		# The agent runs as this user, so the job is unloaded from this user's
+		# launchd domain rather than stopped as a system service.
+		launchctl bootout "gui/$(id -u)/com.monitor.agent" 2>/dev/null || true
+		launchctl unload "$UNIT_FILE" 2>/dev/null || true
+		rm -f "$UNIT_FILE" "$LOG_FILE" "$BIN" "$BIN.old" "$ENV_FILE" "$ROOT/run.sh"
+		rm -rf "$ROOT"/.install-*
+		rmdir "$ROOT" 2>/dev/null || true
+		echo "monitor-agent uninstalled"
+		exit 0
+	fi
 	rc-service monitor-agent stop 2>/dev/null || true
 	rc-update del monitor-agent default >/dev/null 2>&1 || true
 	systemctl disable --now monitor-agent 2>/dev/null || true
 	rm -f "$UNIT_FILE" "$RC_FILE" "$LOG_FILE" "$BIN" "$BIN.old" "$ENV_FILE" \
-		"$UNIT_FILE".install-* "$RC_FILE".install-*
+		"$UNIT_FILE".install-* "$RC_FILE".install-* "$ROOT/run.sh"
 	rm -rf "$ROOT"/.install-*
 	systemctl daemon-reload 2>/dev/null || true
 	userdel monitor-agent 2>/dev/null || deluser monitor-agent 2>/dev/null || true
@@ -113,7 +150,9 @@ fi
 if [ -z "$INTERVAL" ]; then
 	INTERVAL=$(cat "$UNIT_FILE" "$RC_FILE" 2>/dev/null | sed -n \
 		-e 's/^ExecStart=.* --interval \([0-9][0-9]*\).*/\1/p' \
-		-e 's/^command_args="--interval \([0-9][0-9]*\).*/\1/p' | tail -n 1)
+		-e 's/^command_args="--interval \([0-9][0-9]*\).*/\1/p' \
+		-e 's/.*--interval \([0-9][0-9]*\).*/\1/p' \
+		-e 's/.*<integer>\([0-9][0-9]*\)<\/integer>.*/\1/p' | tail -n 1)
 	if [ -n "$INTERVAL" ]; then echo "keeping --interval $INTERVAL from the previous install"; else INTERVAL=1; fi
 fi
 case "$INTERVAL" in "" | *[!0-9]*) echo "interval must be an integer from 1 to 3600" >&2; exit 2 ;; esac
@@ -223,7 +262,14 @@ esac
 # container), and every service call below would fail there after the key is
 # spent. Decided before
 # the download and the registration for the same reason.
-if [ -d /run/systemd/system ]; then
+#
+# macOS has no init system in this sense: launchd is always the one running, so
+# there is nothing to detect and nothing that can fail the way a container's
+# systemd does. The agent runs as the user who installs it, so there is no
+# service user to create either.
+if [ "$OS" = Darwin ]; then
+	INIT=launchd
+elif [ -d /run/systemd/system ]; then
 	INIT=systemd
 elif [ -e /run/openrc/softlevel ] && command -v rc-update >/dev/null; then
 	INIT=openrc
@@ -249,12 +295,23 @@ add_user() {
 # the download and the registration, so a host where this fails keeps the agent
 # it already runs and spends no registration key. One case passes this check
 # without a user and is settled after the old agent stops; see there.
-id -u monitor-agent >/dev/null 2>&1 || add_user ||
-	{ echo "cannot create the system user monitor-agent" >&2; exit 1; }
+#
+# Under launchd the agent runs as the user who installs it, so there is no
+# service user: the job is registered in that user's own launchd domain.
+if [ "$OS" != Darwin ]; then
+	id -u monitor-agent >/dev/null 2>&1 || add_user ||
+		{ echo "cannot create the system user monitor-agent" >&2; exit 1; }
+fi
 
 case "$(uname -m)" in
-x86_64 | amd64) ARCH=x86_64 ;;
-aarch64 | arm64) ARCH=aarch64 ;;
+x86_64 | amd64)
+	ARCH=x86_64
+	[ "$OS" = Darwin ] && ARCH=x86_64-apple-darwin
+	;;
+aarch64 | arm64)
+	ARCH=aarch64
+	[ "$OS" = Darwin ] && ARCH=aarch64-apple-darwin
+	;;
 *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
@@ -272,12 +329,21 @@ URL="${SERVER%/}/agent/$ARCH"
 # leaves nothing behind, and a concurrent one cannot remove what this one
 # staged.
 install -d -m 0755 "$ROOT"
+# The launchd job's directory may not exist yet on a machine that has never run
+# a user agent; the staged plist is written into it, so it is created here
+# rather than failing later at the staging step.
+[ "$OS" != Darwin ] || install -d -m 0755 "$(dirname "$UNIT_FILE")"
 # A run killed outright leaves its staging behind: a directory holding a whole
 # binary, and a service definition beside the final one. Those untouched for a
 # day belong to no live run.
 find "$ROOT" -maxdepth 1 -name '.install-*' -mmin +1440 -exec rm -rf {} \; 2>/dev/null || true
-find /etc/systemd/system /etc/init.d -maxdepth 1 -name 'monitor-agent*.install-*' -mmin +1440 \
-	-exec rm -f {} \; 2>/dev/null || true
+if [ "$OS" != Darwin ]; then
+	find /etc/systemd/system /etc/init.d -maxdepth 1 -name 'monitor-agent*.install-*' -mmin +1440 \
+		-exec rm -f {} \; 2>/dev/null || true
+else
+	find "$(dirname "$UNIT_FILE")" -maxdepth 1 -name 'monitor-agent*.install-*' -mmin +1440 \
+		-exec rm -f {} \; 2>/dev/null || true
+fi
 STAGE="" SERVICE_NEW=""
 # Staged files are removed on any exit before they take their final names, and
 # $ROOT once nothing is left in it. Until the stop below a signal is turned into
@@ -342,14 +408,31 @@ fi
 # mirror's error page. Checked before the running agent is stopped, so a batch
 # run through such a relay leaves each machine on the agent it had, rather than
 # on bytes that cannot start while this script reports success.
-[ "$(head -c 4 "$TMP")" = "$(printf '\177ELF')" ] ||
-	{ echo "${BINARY:-the download} is not a Linux executable: $(head -n 1 "$TMP" | tr -cd '[:print:]' | cut -c1-200)" >&2; exit 1; }
-# e_machine, as the hub checks what it relays: a file uploaded for the other
-# architecture is refused here, before a key is spent or the old agent stops.
-case "$ARCH:$(od -An -tu2 -j18 -N2 "$TMP" | tr -d ' ')" in
-x86_64:62 | aarch64:183) ;;
-*) echo "${BINARY:-the download} is not built for $ARCH; use monitor-agent-$ARCH-unknown-linux-musl" >&2; exit 1 ;;
-esac
+#
+# A macOS agent is a Mach-O executable, whose magic is the four bytes 0xfeedfacf
+# for a 64-bit little-endian binary, which od -tx1 renders as cffaedfe. A Linux
+# one is ELF, whose magic is 0x7fELF. The architecture is read from the Mach-O
+# header instead of ELF's e_machine: the CPU type sits at offset 4 and the CPU
+# subtype at offset 8, and the type is what a 64-bit binary carries -- od -tx4
+# renders 0x0100000c for arm64 and 0x01000007 for x86_64, leading zero kept.
+if [ "$OS" = Darwin ]; then
+	[ "$(head -c 4 "$TMP" | od -An -tx1 | tr -d ' \n')" = "cffaedfe" ] ||
+		{ echo "${BINARY:-the download} is not a macOS executable: $(head -n 1 "$TMP" | tr -cd '[:print:]' | cut -c1-200)" >&2; exit 1; }
+	CPU=$(od -An -tx4 -j4 -N4 "$TMP" | tr -d ' \n')
+	case "$ARCH:$CPU" in
+	aarch64-apple-darwin:0100000c | x86_64-apple-darwin:01000007) ;;
+	*) echo "${BINARY:-the download} is not built for $ARCH" >&2; exit 1 ;;
+	esac
+else
+	[ "$(head -c 4 "$TMP")" = "$(printf '\177ELF')" ] ||
+		{ echo "${BINARY:-the download} is not a Linux executable: $(head -n 1 "$TMP" | tr -cd '[:print:]' | cut -c1-200)" >&2; exit 1; }
+	# e_machine, as the hub checks what it relays: a file uploaded for the other
+	# architecture is refused here, before a key is spent or the old agent stops.
+	case "$ARCH:$(od -An -tu2 -j18 -N2 "$TMP" | tr -d ' ')" in
+	x86_64:62 | aarch64:183) ;;
+	*) echo "${BINARY:-the download} is not built for $ARCH; use monitor-agent-$ARCH-unknown-linux-musl" >&2; exit 1 ;;
+	esac
+fi
 
 # Kept until the new binary has proved it starts; see not_started. Never over
 # an existing copy: a run that died before that check left an unproven binary
@@ -426,13 +509,88 @@ fi
 	cat >"$STAGE/agent.env" <<ENV
 MONITOR_SERVER=$SERVER
 MONITOR_TOKEN=$TOKEN
+MONITOR_INTERVAL=$INTERVAL
 ENV
 	[ -z "$IFACE" ] || printf 'MONITOR_IFACE=%s\n' "$IFACE" >>"$STAGE/agent.env"
 )
 
+# Generate run.sh wrapper for launchd (reads env and execs the binary with args).
+# It is staged alongside agent.env so the atomic mv at the end installs both.
+#
+# The paths are written out absolute rather than derived from $HOME at run
+# time: launchd starts a job with a minimal environment, and a HOME that is
+# absent or different would send the agent looking for its token elsewhere.
+# The unquoted heredoc expands $ROOT here and leaves the rest for the shell
+# that runs the job.
+cat >"$STAGE/run.sh" <<RUN
+#!/bin/sh
+# Loads the node token from a file that only the owner can read, then execs
+# the agent. The token never appears in the launchd plist, which is readable
+# by other users on this machine.
+set -eu
+
+ENV_FILE="$ROOT/agent.env"
+[ -f "\$ENV_FILE" ] || { echo "missing \$ENV_FILE" >&2; exit 1; }
+# shellcheck disable=SC1090
+. "\$ENV_FILE"
+
+: "\${MONITOR_SERVER:?MONITOR_SERVER is not set in \$ENV_FILE}"
+: "\${MONITOR_TOKEN:?MONITOR_TOKEN is not set in \$ENV_FILE}"
+
+export MONITOR_SERVER MONITOR_TOKEN
+
+exec "$ROOT/monitor-agent" \\
+	--interval "\${MONITOR_INTERVAL:-10}" \\
+	\${MONITOR_IFACE:+--iface "\$MONITOR_IFACE"}
+RUN
+chmod 0755 "$STAGE/run.sh"
+
 # The service definition is staged beside its final name for the reason the
 # files above are: /etc commonly shares a disk with $ROOT.
-if [ "$INIT" = openrc ]; then
+if [ "$INIT" = launchd ]; then
+	SERVICE_FILE="$UNIT_FILE"
+	SERVICE_NEW=$(mktemp "$UNIT_FILE.install-XXXXXX")
+	# A launchd job, in the user's own domain: it starts when the user logs in
+	# and is restarted if the agent exits.
+	#
+	# The token stays in the env file rather than in this plist, which every
+	# local user can read. The wrapper reads it and execs the agent, so the
+	# token is in the process environment rather than in the job definition.
+	cat >"$SERVICE_NEW" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.monitor.agent</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>$ROOT/run.sh</string>
+	</array>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>KeepAlive</key>
+	<true/>
+
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<key>StandardOutPath</key>
+	<string>$LOG_FILE</string>
+
+	<key>StandardErrorPath</key>
+	<string>$LOG_FILE</string>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>
+PLIST
+elif [ "$INIT" = openrc ]; then
 	SERVICE_FILE="$RC_FILE"
 	SERVICE_NEW=$(mktemp "$RC_FILE.install-XXXXXX")
 	cat >"$SERVICE_NEW" <<RC
@@ -515,7 +673,10 @@ fi
 # can fail too, once the terminal has gone or a pipe reader has died.
 trap '' HUP INT QUIT TERM TSTP PIPE
 set +e
-if [ "$INIT" = openrc ]; then
+if [ "$OS" = Darwin ]; then
+	launchctl bootout "gui/$(id -u)/com.monitor.agent" 2>/dev/null || true
+	launchctl unload "$UNIT_FILE" 2>/dev/null || true
+elif [ "$INIT" = openrc ]; then
 	rc-service monitor-agent stop 2>/dev/null || true
 else
 	systemctl stop monitor-agent 2>/dev/null || true
@@ -538,7 +699,9 @@ fi
 not_started() {
 	if [ -f "$BIN.old" ]; then
 		mv -f "$BIN.old" "$BIN"
-		if [ "$INIT" = openrc ]; then
+		if [ "$OS" = Darwin ]; then
+			launchctl kickstart -k "gui/$(id -u)/com.monitor.agent" 2>/dev/null || true
+		elif [ "$INIT" = openrc ]; then
 			rc-service monitor-agent restart >/dev/null 2>&1
 		else
 			systemctl restart monitor-agent
@@ -554,6 +717,7 @@ not_started() {
 if ! { { [ ! -f "$STAGE/old" ] || mv -f "$STAGE/old" "$BIN.old"; } &&
 	mv -f "$STAGE/monitor-agent" "$BIN" &&
 	mv -f "$STAGE/agent.env" "$ENV_FILE" &&
+	mv -f "$STAGE/run.sh" "$ROOT/run.sh" &&
 	mv -f "$SERVICE_NEW" "$SERVICE_FILE"; }; then
 	echo "the new files could not be renamed into place" >&2
 	not_started "the message above"
@@ -576,18 +740,33 @@ if [ "$INIT" = openrc ]; then
 	exit 0
 fi
 
-systemctl daemon-reload
-systemctl enable monitor-agent >/dev/null
-# restart rather than `enable --now`: --now leaves an already-running service
-# untouched, so reinstalling over a live agent would keep the old binary
-# running.
-systemctl restart monitor-agent
-# Type=simple counts the service started once it is forked, so `restart` above
-# succeeds also for one that fails at once -- a user it cannot resolve
-# (217/USER), a binary that exits -- and is then restarted every RestartSec.
-# Checked inside that window, so a batch run shows the failure on the machine
-# where it happened rather than a line reading "installed".
-sleep 3
-systemctl is-active --quiet monitor-agent || not_started "journalctl -u monitor-agent -n 20"
+if [ "$INIT" = launchd ]; then
+	# A launchd job, in the user's own domain: it starts when the user logs in
+	# and is restarted if the agent exits. Bootstrap after the plist is in
+	# place, then kickstart so the agent starts even if the user is not at a
+	# login window yet (headless login, SSH).
+	launchctl bootstrap "gui/$(id -u)/com.monitor.agent" "$SERVICE_FILE" 2>/dev/null \
+		|| launchctl load -w "$SERVICE_FILE" 2>/dev/null \
+		|| true
+	launchctl kickstart -k "gui/$(id -u)/com.monitor.agent" 2>/dev/null || true
+else
+	systemctl daemon-reload
+	systemctl enable monitor-agent >/dev/null
+	# restart rather than `enable --now`: --now leaves an already-running service
+	# untouched, so reinstalling over a live agent would keep the old binary
+	# running.
+	systemctl restart monitor-agent
+	# Type=simple counts the service started once it is forked, so `restart` above
+	# succeeds also for one that fails at once -- a user it cannot resolve
+	# (217/USER), a binary that exits -- and is then restarted every RestartSec.
+	# Checked inside that window, so a batch run shows the failure on the machine
+	# where it happened rather than a line reading "installed".
+	sleep 3
+	systemctl is-active --quiet monitor-agent || not_started "journalctl -u monitor-agent -n 20"
+fi
 rm -f "$BIN.old"
-echo "monitor-agent installed; follow it with: journalctl -u monitor-agent -f"
+if [ "$OS" = Darwin ]; then
+	echo "monitor-agent installed; follow it with: tail -f $LOG_FILE"
+else
+	echo "monitor-agent installed; follow it with: journalctl -u monitor-agent -f"
+fi

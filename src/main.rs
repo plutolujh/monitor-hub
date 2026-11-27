@@ -313,6 +313,53 @@ fn relayable(key: &[u8], binary: &[u8], signature: &[u8], arch: &str) -> bool {
     signed(key, binary, signature) && built_for(binary, arch)
 }
 
+/// The macOS architectures this hub relays, named as the Rust target they are
+/// built for.
+///
+/// The upstream project publishes an agent for Linux and none for macOS, so
+/// the macOS agent is a third-party release of its own, signed with a key of
+/// its own. It is relayed the same way the Linux one is: fetched from a signed
+/// release and verified under a key built into this binary, so a mirror can
+/// withhold or replace the file but cannot sign it.
+const MACOS_ARCHES: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
+
+/// The repository the macOS agent is released from.
+const MACOS_AGENT_REPO: &str = "plutolujh/monitor-macOS";
+
+/// The key the macOS agent's release job signs each binary with (ed25519, the
+/// raw 32 bytes). A key of its own, because the macOS agent is not the
+/// upstream release job's to sign.
+const MACOS_AGENT_SIGNING_KEY: [u8; 32] = [
+    0x89, 0x51, 0x65, 0xe3, 0xb0, 0xb9, 0xc2, 0x2b, 0x99, 0x49, 0x6c, 0x6a, 0xed, 0xc7, 0xf6, 0xfd,
+    0x19, 0xad, 0x7a, 0x9c, 0x62, 0x3d, 0xbf, 0x5b, 0xba, 0x8d, 0x99, 0x0e, 0x91, 0x3c, 0xe6, 0xb2,
+];
+
+/// The release URL of the macOS agent for `arch`.
+///
+/// The same shape as the Linux one: the latest release's asset of that name,
+/// through the panel's GitHub proxy when one is set. A hub that cannot reach
+/// github.com for the Linux agent cannot reach it for this one either.
+fn macos_release_url(app: &App, arch: &str) -> String {
+    proxied(app, format!("https://github.com/{MACOS_AGENT_REPO}/releases/latest/download/monitor-agent-{arch}"))
+}
+
+/// Whether `binary` is a Mach-O executable for `arch`.
+///
+/// The Linux agent's architecture is in its ELF header; the macOS one is in a
+/// Mach-O header, whose first four bytes are the magic and whose next four are
+/// the CPU type: 0x0100000c for arm64, 0x01000007 for x86_64. A signature
+/// covers the bytes alone, so a mirror could answer one architecture's request
+/// with the other's signed binary, and `install.sh` would replace a running
+/// agent with one that cannot start.
+fn built_for_macho(binary: &[u8], arch: &str) -> bool {
+    const MACHO_MAGIC: [u8; 4] = [0xcf, 0xfa, 0xed, 0xfe];
+    if binary.get(0..4) != Some(MACHO_MAGIC.as_slice()) {
+        return false;
+    }
+    let cpu: u32 = if arch == "aarch64-apple-darwin" { 0x0100_000c } else { 0x0100_0007 };
+    binary.get(4..8).is_some_and(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) == cpu)
+}
+
 /// One GET of a release asset, whole, refused past `max` bytes.
 async fn fetch_asset(app: &App, url: &str, what: &str, max: usize) -> Result<Vec<u8>, String> {
     let who = if url.starts_with("https://github.com/") { "GitHub" } else { "the GitHub proxy" };
@@ -369,7 +416,14 @@ impl futures_core::Stream for Once {
 /// fetched from the same place: a mirror can withhold or replace either, but
 /// cannot produce a signature that verifies. The key is the hub's, not the
 /// release's, so an agent release needs no hub release.
+///
+/// A macOS agent is fetched the same way, from a release of its own signed
+/// with a key of its own: the upstream project publishes none, and the macOS
+/// one is a third-party release. See [`macos_binary`].
 async fn agent_binary(State(app): State<Shared>, Path(arch): Path<String>) -> Response {
+    if MACOS_ARCHES.contains(&arch.as_str()) {
+        return macos_binary(&app, &arch).await;
+    }
     if !matches!(arch.as_str(), "x86_64" | "aarch64") {
         return api::answer(StatusCode::NOT_FOUND, "unknown architecture");
     }
@@ -389,6 +443,56 @@ async fn agent_binary(State(app): State<Shared>, Path(arch): Path<String>) -> Re
             warn!("{url} does not match its signature or architecture; not relayed");
             return Err(
                 "the agent binary failed its signature check, so the hub refused to relay it".to_owned()
+            );
+        }
+        Ok(binary)
+    };
+    let budget = RELAY_HEAD.saturating_sub(asked.elapsed());
+    let Ok(fetched) = tokio::time::timeout(budget, fetched).await else {
+        warn!("fetching {url} took longer than {} s; not relayed", RELAY_HEAD.as_secs());
+        return api::answer(
+            StatusCode::BAD_GATEWAY,
+            "GitHub or the GitHub proxy was too slow to deliver the agent before the response deadline",
+        );
+    };
+    match fetched {
+        Ok(binary) => (
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            axum::body::Body::from_stream(metered(Once(Some(binary.into())), permit)),
+        )
+            .into_response(),
+        Err(refusal) => api::answer(StatusCode::BAD_GATEWAY, refusal),
+    }
+}
+
+/// Serves the macOS agent binary, so a Mac that can reach the hub can install
+/// without reaching GitHub.
+///
+/// The upstream project publishes no macOS agent, so this is a third-party
+/// release, and it is verified the way the upstream one is: the binary and its
+/// signature are fetched together from the release, and the binary is relayed
+/// only if the signature verifies under the key built into this hub and the
+/// Mach-O header names the architecture that was asked for. A mirror can
+/// withhold or replace either file, but cannot produce a signature that
+/// verifies.
+async fn macos_binary(app: &App, arch: &str) -> Response {
+    let asked = tokio::time::Instant::now();
+    let Ok(Ok(permit)) = tokio::time::timeout(RELAY_WAIT, RELAY_GATE.acquire()).await else {
+        return api::answer(StatusCode::SERVICE_UNAVAILABLE, "too many downloads in flight, try again");
+    };
+    let url = macos_release_url(app, arch);
+    let sig = format!("{url}.sig");
+    // English, as `install.sh` prints it after its own English line.
+    let fetched = async {
+        let (binary, signature) = tokio::try_join!(
+            fetch_asset(app, &url, "macOS agent binary", MAX_AGENT_BINARY),
+            fetch_asset(app, &sig, "macOS agent signature", 64),
+        )?;
+        if !signed(&MACOS_AGENT_SIGNING_KEY, &binary, &signature) || !built_for_macho(&binary, arch) {
+            warn!("{url} does not match its signature or architecture; not relayed");
+            return Err(
+                "the macOS agent binary failed its signature check, so the hub refused to relay it"
+                    .to_owned(),
             );
         }
         Ok(binary)
