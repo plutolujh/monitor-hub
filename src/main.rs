@@ -330,8 +330,8 @@ const MACOS_AGENT_REPO: &str = "plutolujh/monitor-macOS";
 /// raw 32 bytes). A key of its own, because the macOS agent is not the
 /// upstream release job's to sign.
 const MACOS_AGENT_SIGNING_KEY: [u8; 32] = [
-    0x89, 0x51, 0x65, 0xe3, 0xb0, 0xb9, 0xc2, 0x2b, 0x99, 0x49, 0x6c, 0x6a, 0xed, 0xc7, 0xf6, 0xfd,
-    0x19, 0xad, 0x7a, 0x9c, 0x62, 0x3d, 0xbf, 0x5b, 0xba, 0x8d, 0x99, 0x0e, 0x91, 0x3c, 0xe6, 0xb2,
+    0x89, 0x51, 0x65, 0xe3, 0xb0, 0xb9, 0xc2, 0x2b, 0x99, 0x49, 0x6c, 0x6a, 0xed, 0xc7, 0xf6, 0xfd, 0x19,
+    0xad, 0x7a, 0x9c, 0x62, 0x3d, 0xbf, 0x5b, 0xba, 0x8d, 0x99, 0x0e, 0x91, 0x3c, 0xe6, 0xb2,
 ];
 
 /// The release URL of the macOS agent for `arch`.
@@ -340,7 +340,10 @@ const MACOS_AGENT_SIGNING_KEY: [u8; 32] = [
 /// through the panel's GitHub proxy when one is set. A hub that cannot reach
 /// github.com for the Linux agent cannot reach it for this one either.
 fn macos_release_url(app: &App, arch: &str) -> String {
-    proxied(app, format!("https://github.com/{MACOS_AGENT_REPO}/releases/latest/download/monitor-agent-{arch}"))
+    proxied(
+        app,
+        format!("https://github.com/{MACOS_AGENT_REPO}/releases/latest/download/monitor-agent-{arch}"),
+    )
 }
 
 /// Whether `binary` is a Mach-O executable for `arch`.
@@ -490,10 +493,8 @@ async fn macos_binary(app: &App, arch: &str) -> Response {
         )?;
         if !signed(&MACOS_AGENT_SIGNING_KEY, &binary, &signature) || !built_for_macho(&binary, arch) {
             warn!("{url} does not match its signature or architecture; not relayed");
-            return Err(
-                "the macOS agent binary failed its signature check, so the hub refused to relay it"
-                    .to_owned(),
-            );
+            return Err("the macOS agent binary failed its signature check, so the hub refused to relay it"
+                .to_owned());
         }
         Ok(binary)
     };
@@ -874,6 +875,7 @@ async fn serve(listener: tokio::net::TcpListener, router: Router) {
         // its response on a closed window and hold the descriptor indefinitely.
         // The kernel aborts a window that stays closed, or data that nobody
         // acknowledges, after this long.
+        #[cfg(target_os = "linux")]
         let _ = rustix::net::sockopt::set_tcp_user_timeout(&stream, STALL.as_millis() as u32);
         let service = router.clone().map_request(move |mut req: axum::http::Request<Incoming>| {
             req.extensions_mut().insert(ConnectInfo(peer));
@@ -902,6 +904,11 @@ async fn serve(listener: tokio::net::TcpListener, router: Router) {
 /// How long the peer's receive window may stay shut, or data go unacknowledged,
 /// before the kernel drops the connection. The push stream gives up on a send
 /// after 10 s of its own; this bounds the rest.
+///
+/// The socket option it bounds is Linux's alone, so the constant is built
+/// only where it is used: on a system without it the constant would be dead
+/// code, and the build denies warnings.
+#[cfg(target_os = "linux")]
 const STALL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How long a stop waits for in-flight requests.
