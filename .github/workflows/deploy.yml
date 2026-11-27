@@ -1,0 +1,121 @@
+name: Deploy monitor hub to VPS
+
+# A push does not deploy. This job replaces the hub binary on the host the
+# monitoring runs on and restarts the service, which is not something a commit
+# should do on its own; it is started by hand, when the change is one to ship.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: monitor-hub-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy to VPS
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      VPS_HOST: ${{ vars.VPS_HOST }}
+      VPS_USER: ${{ vars.VPS_USER }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The default theme arrives as a published archive, verified against the
+      # hash in web-theme.pin. Run on the runner rather than left to build.rs,
+      # because the cross container below does not necessarily carry curl; it
+      # finds the theme already unpacked.
+      - run: ./scripts/theme.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web-admin/package-lock.json
+
+      # rust-embed requires the panel's dist/ to exist before cargo runs: the
+      # hub embeds it, so a build without it produces a binary that serves no
+      # panel.
+      - run: npm ci && npm run build
+        working-directory: web-admin
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      # musl-static, not glibc: the hub on the VPS is a static binary, and one
+      # built against the runner's glibc would fail to start on the host if its
+      # glibc is older. cross builds the same target the upstream release does.
+      - run: cargo install --locked cross
+      - run: cross build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Prepare SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      # The hub binary is put in place and the service is restarted once, so
+      # there is a single moment of downtime rather than two.
+      #
+      # install.sh is embedded in the hub binary, so replacing the binary is
+      # also what changes the installer the node downloads.
+      #
+      # The macOS agent is not deployed here: it comes from its own signed
+      # release, and the hub fetches and verifies it when a node asks.
+      - name: Deploy hub, restart service
+        run: |
+          KEY="$HOME/.ssh/deploy_key"
+          OPTS="-i $KEY -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          BIN="target/x86_64-unknown-linux-musl/release/monitor-hub"
+
+          ssh $OPTS "$VPS_USER@$VPS_HOST" 'install -d -m 0755 /opt/monitor'
+
+          scp $OPTS "$BIN" "$VPS_USER@$VPS_HOST:/opt/monitor/monitor-hub.new"
+
+          # The binary is renamed into place rather than copied over: a copy
+          # onto the file the running hub is executing fails with "Text file
+          # busy", and a rename replaces it atomically, leaving the running
+          # process on the old inode until it is restarted.
+          ssh $OPTS "$VPS_USER@$VPS_HOST" \
+            "chmod 0755 /opt/monitor/monitor-hub.new \
+             && mv -f /opt/monitor/monitor-hub.new /opt/monitor/monitor-hub \
+             && systemctl restart monitor-hub \
+             && sleep 3 \
+             && systemctl is-active monitor-hub"
+
+      # What the node actually sees. The installer is served from the hub
+      # binary, and the macOS agent from the release the hub verifies, so both
+      # are checked the way a node fetches them.
+      - name: Verify the installer and the macOS agent
+        run: |
+          set -eu
+          SITE="https://monitor.hao123456.cn"
+
+          curl -fsSL "$SITE/install.sh" -o /tmp/install.sh
+          grep -q 'Darwin' /tmp/install.sh || {
+            echo "::error::the served install.sh has no macOS branch"
+            exit 1
+          }
+          grep -q 'LaunchAgents' /tmp/install.sh || {
+            echo "::error::the served install.sh does not install a launchd job"
+            exit 1
+          }
+
+          curl -fsSL "$SITE/agent/aarch64-apple-darwin" -o /tmp/agent
+          # A Mach-O binary: the magic at the start is what tells a macOS
+          # machine it can run it, and an ELF one would not. The hub relays
+          # this only after the signature verifies, so reaching here also says
+          # the release and the key in the hub agree.
+          head -c 4 /tmp/agent | od -An -tx1 | grep -q 'cf fa ed fe' || {
+            echo "::error::the relayed macOS agent is not a Mach-O binary"
+            exit 1
+          }
+          echo "sha256: $(sha256sum /tmp/agent | cut -d' ' -f1)"
+          echo "the installer and the macOS agent are being served correctly"
