@@ -329,7 +329,7 @@ export function Nodes({ nodes, refresh, site, refusal, versions }: { nodes: Node
                           variant="outline"
                           className={
                             behindLatest(n)
-                              ? "font-normal text-destructive"
+                              ? "font-normal text-near"
                               : "font-normal text-muted-foreground"
                           }
                         >

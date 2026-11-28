@@ -1889,27 +1889,58 @@ const RELEASES_RETRY: i64 = 600;
 /// never opened makes no outbound request.
 pub async fn versions(_: Admin, State(app): State<Shared>) -> Json<Value> {
     let cached = app.releases.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let latest = if fresh_enough(&cached, Utc::now().timestamp()) {
-        cached
-    } else {
-        // Both at once: one round trip of latency rather than two, and neither
-        // lookup depends on the other.
-        let (hub, agent, agent_macos) = tokio::join!(
-            latest_tag(&app, crate::HUB_REPO),
-            latest_tag(&app, crate::AGENT_REPO),
-            latest_tag(&app, crate::MACOS_AGENT_REPO),
-        );
-        let read = crate::Releases {
-            read_at: Utc::now().timestamp(),
-            hub: hub.unwrap_or_default(),
-            agent: agent.unwrap_or_default(),
-            agent_macos: agent_macos.unwrap_or_default(),
-        };
-        *app.releases.lock().unwrap_or_else(|e| e.into_inner()) = read.clone();
-        read
+    let now = Utc::now().timestamp();
+    let due = lines_due(&cached, now);
+    // All at once: one round trip of latency rather than three, and none of the
+    // lookups depends on another. A line that is still held keeps its answer
+    // without asking GitHub again.
+    let (hub, agent, agent_macos) = tokio::join!(
+        async {
+            if due.hub {
+                latest_tag(&app, crate::HUB_REPO).await.unwrap_or_default()
+            } else {
+                cached.hub.clone()
+            }
+        },
+        async {
+            if due.agent {
+                latest_tag(&app, crate::AGENT_REPO).await.unwrap_or_default()
+            } else {
+                cached.agent.clone()
+            }
+        },
+        async {
+            if due.agent_macos {
+                latest_tag(&app, crate::MACOS_AGENT_REPO).await.unwrap_or_default()
+            } else {
+                cached.agent_macos.clone()
+            }
+        },
+    );
+    let read = crate::Releases {
+        hub,
+        agent,
+        agent_macos,
+        hub_read_at: if due.hub { now } else { cached.hub_read_at },
+        agent_read_at: if due.agent { now } else { cached.agent_read_at },
+        agent_macos_read_at: if due.agent_macos { now } else { cached.agent_macos_read_at },
     };
-    Json(json!({
-        "hub": env!("CARGO_PKG_VERSION"),
+    // Nothing was read, so the cache stands as it is.
+    if due.any() {
+        *app.releases.lock().unwrap_or_else(|e| e.into_inner()) = read.clone();
+    }
+    Json(versions_payload(
+        env!("CARGO_PKG_VERSION"),
+        &read,
+        app.db.get("update_notice").as_deref() != Some("off"),
+    ))
+}
+
+/// The payload the panel reads. The key names are the contract with it: the
+/// panel sorts the nodes into the two release lines by them.
+fn versions_payload(hub: &str, latest: &crate::Releases, notice: bool) -> Value {
+    json!({
+        "hub": hub,
         // Empty where GitHub could not be reached, which the panel renders as no
         // update rather than as an error: a hub on a network that cannot reach
         // github.com is a supported deployment, not a fault to report.
@@ -1921,21 +1952,46 @@ pub async fn versions(_: Admin, State(app): State<Shared>) -> Json<Value> {
         "agent_latest_macos": latest.agent_macos,
         // Whether the navigation marks an update. It governs the mark alone: the
         // lookup runs either way, so the update page still answers when opened.
-        "notice": app.db.get("update_notice").as_deref() != Some("off"),
-    }))
+        "notice": notice,
+    })
 }
 
-/// Whether the cached lookup still answers. One that returned nothing is held
-/// for [`RELEASES_RETRY`] instead, so a single unreachable moment does not hide
-/// an update for the rest of the day.
-fn fresh_enough(cached: &crate::Releases, now: i64) -> bool {
-    let holds = if cached.hub.is_empty() || cached.agent.is_empty() || cached.agent_macos.is_empty() {
-        RELEASES_RETRY
-    } else {
-        RELEASES_FRESH
-    };
-    // A negative age is a clock set back since the lookup, not a fresh one.
-    cached.read_at != 0 && (0..holds).contains(&(now - cached.read_at))
+/// Which release lines are due for another look.
+#[derive(Default)]
+struct Due {
+    hub: bool,
+    agent: bool,
+    agent_macos: bool,
+}
+
+impl Due {
+    fn any(&self) -> bool {
+        self.hub || self.agent || self.agent_macos
+    }
+}
+
+/// Which release lines are due for another look.
+///
+/// Each line is held on its own clock: an answer for six hours, a failure for
+/// ten minutes. One repository being unreachable costs its own line a retry
+/// and leaves the other two answers standing.
+fn lines_due(cached: &crate::Releases, now: i64) -> Due {
+    Due {
+        hub: line_due(&cached.hub, cached.hub_read_at, now),
+        agent: line_due(&cached.agent, cached.agent_read_at, now),
+        agent_macos: line_due(&cached.agent_macos, cached.agent_macos_read_at, now),
+    }
+}
+
+/// Whether one line is due for another look.
+fn line_due(value: &str, read_at: i64, now: i64) -> bool {
+    // A read from the future is a clock set back since the lookup, not a fresh
+    // one.
+    if read_at == 0 || now < read_at {
+        return true;
+    }
+    let holds = if value.is_empty() { RELEASES_RETRY } else { RELEASES_FRESH };
+    now - read_at >= holds
 }
 
 /// The tag of a repository's latest release, without its leading `v`, or None
@@ -2461,30 +2517,107 @@ mod tests {
     /// 503. Tokio's mutex, since the guard is held across awaits.
     static HISTORY_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// The panel sorts the nodes into the two release lines by this field, so
+    /// the name is the contract between the two: a misspelled one puts every
+    /// macOS node on the Linux line, where it is behind forever.
+    #[test]
+    fn a_node_view_names_the_release_line_it_is_on() {
+        let mac = Node {
+            name: "m".into(),
+            os: "macOS 15.3".into(),
+            agent_version: "0.2.0".into(),
+            ..Default::default()
+        };
+        let view = node_view(&mac, None, &Traffic::default(), false, Local::now());
+        assert_eq!(view["agent_platform"], "macos");
+        assert_eq!(view["agent_version"], "0.2.0");
+
+        let linux = Node { name: "l".into(), os: "Ubuntu 24.04".into(), ..Default::default() };
+        let view = node_view(&linux, None, &Traffic::default(), false, Local::now());
+        assert_eq!(view["agent_platform"], "linux");
+    }
+
     /// A lookup nobody can refresh must not hide an update all day, and a panel
     /// left open on a screen must not ask GitHub on every load.
     #[test]
     fn a_release_lookup_is_held_for_six_hours_and_a_failed_one_for_ten_minutes() {
         let now = Utc::now().timestamp();
         let read = |read_at, hub: &str, agent: &str, agent_macos: &str| crate::Releases {
-            read_at,
+            hub_read_at: read_at,
             hub: hub.into(),
+            agent_read_at: read_at,
             agent: agent.into(),
+            agent_macos_read_at: read_at,
             agent_macos: agent_macos.into(),
         };
-        assert!(!fresh_enough(&crate::Releases::default(), now), "nothing has been read yet");
-        assert!(fresh_enough(&read(now - 5 * 3600, "1.2.0", "1.1.0", "0.2.0"), now));
-        assert!(!fresh_enough(&read(now - 7 * 3600, "1.2.0", "1.1.0", "0.2.0"), now));
-        assert!(fresh_enough(&read(now - 300, "", "", ""), now), "a failure is held briefly");
-        assert!(!fresh_enough(&read(now - 1200, "1.2.0", "", "0.2.0"), now), "half an answer is a failure");
+        assert!(lines_due(&crate::Releases::default(), now).any(), "nothing has been read yet");
         assert!(
-            !fresh_enough(&read(now + 3600, "1.2.0", "1.1.0", "0.2.0"), now),
+            !lines_due(&read(now - 5 * 3600, "1.2.0", "1.1.0", "0.2.0"), now).any(),
+            "held for six hours"
+        );
+        assert!(
+            lines_due(&read(now - 7 * 3600, "1.2.0", "1.1.0", "0.2.0"), now).any(),
+            "read again after six hours"
+        );
+        assert!(!lines_due(&read(now - 300, "", "", ""), now).any(), "a failure is held briefly");
+        assert!(
+            lines_due(&read(now - 1200, "", "", ""), now).any(),
+            "a failure is read again after ten minutes"
+        );
+        assert!(
+            lines_due(&read(now + 3600, "1.2.0", "1.1.0", "0.2.0"), now).any(),
             "read before the clock was set back"
         );
-        assert!(
-            !fresh_enough(&read(now - 5 * 3600, "1.2.0", "1.1.0", ""), now),
-            "a missing line is read again soon"
-        );
+    }
+
+    /// The three release lines are read from three repositories, and one of
+    /// them being unreachable must not shorten the others' hold: the Linux line
+    /// answered five hours ago and stays answered, while the macOS line that
+    /// failed a minute ago is read again.
+    #[test]
+    fn each_release_line_is_held_on_its_own_clock() {
+        let now = Utc::now().timestamp();
+        let cached = crate::Releases {
+            hub: "1.5.2".into(),
+            hub_read_at: now - 5 * 3600,
+            agent: "1.2.4".into(),
+            agent_read_at: now - 5 * 3600,
+            agent_macos: String::new(),
+            agent_macos_read_at: now - 20 * 60,
+        };
+        let due = lines_due(&cached, now);
+        assert!(!due.hub, "the hub's answer is still held");
+        assert!(!due.agent, "the Linux answer is still held");
+        assert!(due.agent_macos, "the failed line is read again");
+
+        // A failure minutes old is still held, on its own line's clock.
+        let mut recent = cached.clone();
+        recent.agent_macos_read_at = now - 60;
+        assert!(!lines_due(&recent, now).agent_macos, "a failure is held briefly")
+    }
+
+    /// The keys are the contract with the panel: a misspelled one leaves the
+    /// panel comparing a macOS node with the Linux line's version, which is the
+    /// fault this split exists to fix, and nothing would say so.
+    #[test]
+    fn the_version_payload_names_both_agent_lines() {
+        let latest = crate::Releases {
+            hub: "1.5.2".into(),
+            hub_read_at: 1,
+            agent: "1.2.4".into(),
+            agent_read_at: 1,
+            agent_macos: "0.2.0".into(),
+            agent_macos_read_at: 1,
+        };
+        let payload = versions_payload("1.5.2", &latest, true);
+        assert_eq!(payload["hub"], "1.5.2");
+        assert_eq!(payload["hub_latest"], "1.5.2");
+        assert_eq!(payload["agent_latest"], "1.2.4");
+        assert_eq!(payload["agent_latest_macos"], "0.2.0");
+        assert_eq!(payload["notice"], true);
+        for key in ["hub", "hub_latest", "agent_latest", "agent_latest_macos", "notice"] {
+            assert!(payload.get(key).is_some(), "{key} is missing from the payload");
+        }
     }
 
     fn app_with_site(site: &str) -> App {

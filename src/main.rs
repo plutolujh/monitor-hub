@@ -90,13 +90,18 @@ pub struct App {
 
 #[derive(Default, Clone)]
 pub struct Releases {
-    /// The second these were read, 0 before the first read.
-    pub read_at: i64,
     /// Tags without their leading `v`, empty where the lookup failed.
     pub hub: String,
     pub agent: String,
     /// The macOS agent's own line, numbered apart from the Linux one.
     pub agent_macos: String,
+    /// The second each line was read, 0 before that line was read.
+    ///
+    /// Each line is held on its own clock: a repository that cannot be read
+    /// costs its own line a retry, not the other two a fresh look.
+    pub hub_read_at: i64,
+    pub agent_read_at: i64,
+    pub agent_macos_read_at: i64,
 }
 
 impl App {
