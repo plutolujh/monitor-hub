@@ -3,6 +3,7 @@ import { ExternalLink, LogOut, Moon, Sun } from "lucide-react"
 import { Toaster } from "sonner"
 
 import { Admin } from "@/components/Admin"
+import { HubVersion } from "@/components/common"
 import { Login } from "@/components/Login"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -166,6 +167,9 @@ export default function App() {
               {me.site_name || "Monitor"}
             </a>
             <span className="text-xs text-muted-foreground">后台</span>
+            <span className="text-xs text-muted-foreground md:hidden">
+              <HubVersion versions={versions} />
+            </span>
             <div className="flex-1" />
             {/* The status page is a separate app, so this is a navigation. */}
             <Button variant="ghost" size="sm" asChild>

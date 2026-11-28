@@ -1,6 +1,7 @@
 import { ArrowUpCircle, Bell, Database, Palette, Radio, Server, Settings, Shield } from "lucide-react"
 import { useEffect, useRef } from "react"
 
+import { HubVersion } from "@/components/common"
 import { behind, type Node, outdatedAgents, type Versions } from "@/lib/api"
 import { Data } from "@/pages/Data"
 import { Nodes } from "@/pages/Nodes"
@@ -86,6 +87,9 @@ export function Admin({
             </button>
           )
         })}
+        <div className="mt-auto hidden pt-3 md:block">
+          <HubVersion versions={versions} onOpen={() => go("/admin/update")} />
+        </div>
       </nav>
 
       <div className="min-w-0 flex-1">

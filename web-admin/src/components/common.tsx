@@ -8,6 +8,25 @@ import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
+import type { Versions } from "@/lib/api"
+
+/**
+ * The hub's own version, readable without opening a page: at the foot of the
+ * sidebar on a desktop, in the header on a phone.
+ */
+export function HubVersion({ versions, onOpen }: { versions: Versions | null; onOpen?: () => void }) {
+  if (!versions) return null
+  return (
+    <button
+      onClick={onOpen}
+      className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+      title="这台 hub 的版本"
+    >
+      hub <span className="font-medium text-foreground">v{versions.hub}</span>
+    </button>
+  )
+}
+
 export function Segments<K extends string>({ label, options, value, onPick }: {
   label: string
   options: { key: K; label: React.ReactNode }[]
