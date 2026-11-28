@@ -12,7 +12,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { Command, ConfirmDialog, copy, Segments } from "@/components/common"
 import { DragHandle, useDragOrder } from "@/components/drag"
 import { GroupFilter, nameText, NodeSearch, searchNodes, useGroupFilter } from "@/components/pickers"
-import { api, byName, groupsOf, inGroup, keepOrder, type Node, shortAddress, type Source } from "@/lib/api"
+import { agentBehind, api, byName, groupsOf, inGroup, keepOrder, type Node, shortAddress, type Source, type Versions } from "@/lib/api"
 import { uninstallCommand } from "@/lib/commands"
 import { bytes, FOREVER, money, uptime } from "@/lib/format"
 import { useSettings } from "@/lib/settings"
@@ -89,7 +89,7 @@ function trafficTone(n: Node, warnAt: number) {
   return n.month_used * 100 >= n.traffic_limit * warnAt ? "text-near" : ""
 }
 
-export function Nodes({ nodes, refresh, site, refusal }: { nodes: Node[]; refresh: () => void; site: string; refusal: string }) {
+export function Nodes({ nodes, refresh, site, refusal, versions }: { nodes: Node[]; refresh: () => void; site: string; refusal: string; versions: Versions | null }) {
   const settings = useSettings(true).s
   const warnAt = Number(settings?.notify_traffic) || 80
   const expiryDays = Number(settings?.notify_expiry) || 7
@@ -119,6 +119,11 @@ export function Nodes({ nodes, refresh, site, refusal }: { nodes: Node[]; refres
   // Counted within the search and the group, so each count is what its filter
   // would then show.
   const found = inGroup(searchNodes(drag.order, query), group)
+  // Whether this node runs an earlier agent than the one published for its
+  // own line: the macOS and Linux versions are numbered apart, so the
+  // published version of the other line says nothing about it.
+  const behindLatest = (n: Node) =>
+    !!versions && agentBehind(n, versions.agent_latest, versions.agent_latest_macos)
   const attention = ATTENTION.map(([key, label, test]) => ({ key, label, rows: found.filter((n) => test(n, warnAt, expiryDays)) }))
   const picked = attention.find((a) => a.key === status)
   const showChips = status !== "all" || ATTENTION.some(([, , test]) => nodes.some((n) => test(n, warnAt, expiryDays)))
@@ -319,6 +324,18 @@ export function Nodes({ nodes, refresh, site, refusal }: { nodes: Node[]; refres
                           </Badge>
                         )}
                       </div>
+                      {n.agent_version && (
+                        <Badge
+                          variant="outline"
+                          className={
+                            behindLatest(n)
+                              ? "font-normal text-destructive"
+                              : "font-normal text-muted-foreground"
+                          }
+                        >
+                          v{n.agent_version}
+                        </Badge>
+                      )}
                       {n.group && <div className="text-xs text-balance text-muted-foreground">{n.group}</div>}
                     </div>
                   </div>

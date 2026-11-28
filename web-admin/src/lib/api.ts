@@ -391,6 +391,15 @@ export function agentLatest(node: { agent_platform?: string }, linux: string, ma
   return node.agent_platform === "macos" ? macos : linux
 }
 
+/** Whether this node runs an earlier agent than the one published for its own line. */
+export function agentBehind(
+  node: { agent_version: string; agent_platform?: string },
+  linux: string,
+  macos: string,
+): boolean {
+  return behind(node.agent_version, agentLatest(node, linux, macos))
+}
+
 /** The agent's `--iface` as the install dialogs edit it: names to count alone, names to leave out. */
 export type IfaceChoice = { only: string; skip: string }
 

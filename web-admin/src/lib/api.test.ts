@@ -1,6 +1,6 @@
 /// <reference types="node" />
 import assert from "node:assert/strict"
-import { badIfaceName, agentLatest, behind, byName, byPlatform, changes, configFields, configForm, configOverrides, configSections, configValues, currentIface, fits, GIB, groupsOf, ifaceChoice, ifaceSpec, inGroup, keepOrder, loopbackOrigin, outdatedAgents, provisioningSite, provisionRefusal, shortAddress, trafficCorrection, upload, CHUNK } from "./api.ts"
+import { badIfaceName, agentBehind, agentLatest, behind, byName, byPlatform, changes, configFields, configForm, configOverrides, configSections, configValues, currentIface, fits, GIB, groupsOf, ifaceChoice, ifaceSpec, inGroup, keepOrder, loopbackOrigin, outdatedAgents, provisioningSite, provisionRefusal, shortAddress, trafficCorrection, upload, CHUNK } from "./api.ts"
 import { addMonths } from "./format.ts"
 
 // The same results as the hub's roll-over, which uses chrono's checked_add_months.
@@ -58,6 +58,11 @@ assert.deepEqual(byPlatform(mixed).macos, [mixed[0], mixed[2]])
 assert.deepEqual(byPlatform(mixed).linux, [mixed[1]])
 assert.equal(agentLatest(mixed[0], "1.2.4", "0.2.0"), "0.2.0")
 assert.equal(agentLatest(mixed[1], "1.2.4", "0.2.0"), "1.2.4")
+// A node is behind only the version published for its own line: the macOS
+// node at 0.2.0 is current, though the Linux line is at 1.2.4.
+assert.equal(agentBehind(mixed[0], "1.2.4", "0.2.0"), false)
+assert.equal(agentBehind(mixed[1], "1.2.4", "0.2.0"), true)
+assert.equal(agentBehind({ agent_version: "0.2.0", agent_platform: "macos" }, "1.2.4", "0.3.0"), true)
 // A node that never reported a version carries none, so it is not behind.
 assert.deepEqual(outdatedAgents([mixed[2]], "0.2.0"), [])
 // The hub's own version goes through the same comparison.

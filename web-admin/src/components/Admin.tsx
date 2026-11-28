@@ -104,7 +104,7 @@ export function Admin({
         ) : path === "/admin/update" ? (
           <Update versions={versions} reload={reload} nodes={nodes} site={site} refusal={refusal} />
         ) : (
-          <Nodes nodes={nodes} refresh={refresh} site={site} refusal={refusal} />
+          <Nodes nodes={nodes} refresh={refresh} site={site} refusal={refusal} versions={versions} />
         )}
       </div>
     </div>
