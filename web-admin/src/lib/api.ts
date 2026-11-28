@@ -43,6 +43,8 @@ export type Node = {
   swap_total: number
   disk_total: number
   agent_version: string
+  /** Which agent release line this node's version belongs to: "macos" or "linux". Absent from a hub predating it. */
+  agent_platform?: string
   price: number
   currency: string
   billing_cycle: string
@@ -90,6 +92,15 @@ export type Node = {
 }
 
 export type PingTask = { id: number; name: string; target: string; interval: number; nodes: number[]; auto_join: boolean }
+
+/** What is running and what is published, read from the hub's admin-only route. */
+export type Versions = {
+  hub: string
+  hub_latest: string
+  agent_latest: string
+  agent_latest_macos: string
+  notice: boolean
+}
 
 /** Every group in use, in the order of the first node carrying it: the node order decides the group order. */
 export function groupsOf(nodes: Pick<Node, "group">[]): string[] {
@@ -365,6 +376,19 @@ export function behind(current: string, latest: string): boolean {
 /** The nodes running an earlier agent than the published one. */
 export function outdatedAgents<T extends { agent_version: string }>(nodes: T[], latest: string): T[] {
   return nodes.filter((n) => behind(n.agent_version, latest))
+}
+
+/** The nodes on each agent release line, whose versions are numbered apart. */
+export function byPlatform<T extends { agent_platform?: string }>(nodes: T[]): { macos: T[]; linux: T[] } {
+  const macos: T[] = []
+  const linux: T[] = []
+  for (const n of nodes) (n.agent_platform === "macos" ? macos : linux).push(n)
+  return { macos, linux }
+}
+
+/** The published version of the line this node is on: the macOS one or the Linux one. */
+export function agentLatest(node: { agent_platform?: string }, linux: string, macos: string): string {
+  return node.agent_platform === "macos" ? macos : linux
 }
 
 /** The agent's `--iface` as the install dialogs edit it: names to count alone, names to leave out. */

@@ -1,6 +1,6 @@
 /// <reference types="node" />
 import assert from "node:assert/strict"
-import { badIfaceName, behind, byName, changes, configFields, configForm, configOverrides, configSections, configValues, currentIface, fits, GIB, groupsOf, ifaceChoice, ifaceSpec, inGroup, keepOrder, loopbackOrigin, outdatedAgents, provisioningSite, provisionRefusal, shortAddress, trafficCorrection, upload, CHUNK } from "./api.ts"
+import { badIfaceName, agentLatest, behind, byName, byPlatform, changes, configFields, configForm, configOverrides, configSections, configValues, currentIface, fits, GIB, groupsOf, ifaceChoice, ifaceSpec, inGroup, keepOrder, loopbackOrigin, outdatedAgents, provisioningSite, provisionRefusal, shortAddress, trafficCorrection, upload, CHUNK } from "./api.ts"
 import { addMonths } from "./format.ts"
 
 // The same results as the hub's roll-over, which uses chrono's checked_add_months.
@@ -47,6 +47,19 @@ assert.deepEqual(outdatedAgents(fleet, "1.1.0"), [{ agent_version: "1.0.9" }])
 assert.deepEqual(outdatedAgents(fleet, ""), [])
 assert.deepEqual(outdatedAgents([{ agent_version: "1.2" }], "1.2.0"), [])
 assert.deepEqual(outdatedAgents([{ agent_version: "1.2.0-dev" }], "1.2.0"), [{ agent_version: "1.2.0-dev" }])
+// The two agent lines are numbered apart: a macOS node at 0.2.0 is not behind
+// the Linux agent's 1.2.4, and a Linux node is not behind the macOS line's.
+const mixed = [
+  { agent_version: "0.2.0", agent_platform: "macos" },
+  { agent_version: "1.2.3", agent_platform: "linux" },
+  { agent_version: "", agent_platform: "macos" },
+]
+assert.deepEqual(byPlatform(mixed).macos, [mixed[0], mixed[2]])
+assert.deepEqual(byPlatform(mixed).linux, [mixed[1]])
+assert.equal(agentLatest(mixed[0], "1.2.4", "0.2.0"), "0.2.0")
+assert.equal(agentLatest(mixed[1], "1.2.4", "0.2.0"), "1.2.4")
+// A node that never reported a version carries none, so it is not behind.
+assert.deepEqual(outdatedAgents([mixed[2]], "0.2.0"), [])
 // The hub's own version goes through the same comparison.
 assert.equal(behind("1.2.0", "1.10.0"), true)
 assert.equal(behind("1.3.0", "1.2.0"), false)

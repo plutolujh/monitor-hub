@@ -8,10 +8,8 @@ import { Card } from "@/components/ui/card"
 import { Switch } from "@/components/ui/switch"
 
 import { Command, copy, OptionRow } from "@/components/common"
-import { api, behind, type Node, outdatedAgents } from "@/lib/api"
+import { api, behind, type Node, outdatedAgents, type Versions } from "@/lib/api"
 import { upgradeCommand } from "@/lib/commands"
-
-export type Versions = { hub: string; hub_latest: string; agent_latest: string; notice: boolean }
 
 /**
  * What is running and what is published. Read once per panel load: the hub holds
