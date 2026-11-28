@@ -8,7 +8,7 @@ import { Card } from "@/components/ui/card"
 import { Switch } from "@/components/ui/switch"
 
 import { Command, copy, OptionRow } from "@/components/common"
-import { api, behind, type Node, outdatedAgents, type Versions } from "@/lib/api"
+import { api, behind, byPlatform, type Node, outdatedAgents, type Versions } from "@/lib/api"
 import { upgradeCommand } from "@/lib/commands"
 
 /**
@@ -29,7 +29,7 @@ export function useVersions(enabled = true) {
   return { versions, reload: load }
 }
 
-const releaseUrl = (repo: string, version: string) => `https://github.com/monitor-probe/${repo}/releases/tag/v${version}`
+const releaseUrl = (repo: string, version: string) => `https://github.com/${repo}/releases/tag/v${version}`
 
 /** `v1.2.0 → v1.3.0` when something is published, the running version alone otherwise. */
 function VersionPair({ current, latest }: { current: string; latest: string }) {
@@ -59,6 +59,79 @@ function byVersion(nodes: Node[]): [string, Node[]][] {
  * The hub card names the release alone: how to take it depends on how the hub
  * was installed, script or container, which the hub cannot tell.
  */
+/**
+ * One agent release line: what is published for it, and the nodes behind it.
+ *
+ * The two lines are numbered apart, so each is compared with its own
+ * published version. The upgrade command is the same for both and is shown
+ * once, below them.
+ */
+function AgentCard({ title, latest, nodes, repo }: {
+  title: string
+  latest: string
+  nodes: Node[]
+  repo: string
+}) {
+  const offline = nodes.filter((n) => !n.online).length
+  return (
+    <Card className="gap-4 p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-medium">{title}</h3>
+        <span className="text-xs text-muted-foreground">
+          {latest
+            ? nodes.length
+              ? <>最新 v{latest} · <span className="font-medium text-foreground">{nodes.length} 台待升级</span></>
+              : `全部已是最新 v{latest}`
+            : "查不到版本"}
+        </span>
+      </div>
+      {nodes.length > 0 && (
+        <>
+          <div className="flex flex-wrap gap-2">
+            {latest && (
+              <Button size="sm" variant="ghost" asChild>
+                <a href={releaseUrl(repo, latest)} target="_blank" rel="noreferrer">
+                  发布说明
+                </a>
+              </Button>
+            )}
+          </div>
+          {/* Collapsed until asked for, grouped by version, and bounded in height
+              once open, so any number of nodes stays one line on the page. */}
+          <details className="group border-t pt-3">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-md text-xs text-muted-foreground outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden">
+              <span className="flex items-center gap-1.5">
+                <ChevronRight className="size-4 transition-transform group-open:rotate-90" />
+                待升级的节点
+              </span>
+              {offline > 0 && <span>其中 {offline} 台离线</span>}
+            </summary>
+            <div className="mt-3 max-h-60 space-y-3 overflow-auto">
+              {byVersion(nodes).map(([version, group]) => (
+                <div key={version} className="space-y-1.5">
+                  <div className="text-xs text-muted-foreground">v{version} · {group.length} 台</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {group.map((n) => (
+                      <Badge
+                        key={n.id}
+                        variant="secondary"
+                        className={`font-normal ${n.online ? "" : "opacity-50"}`}
+                        title={n.online ? undefined : "离线"}
+                      >
+                        {n.name}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </details>
+        </>
+      )}
+    </Card>
+  )
+}
+
 export function Update({ versions, reload, nodes, site, refusal }: {
   versions: Versions | null
   reload: () => void
@@ -68,10 +141,13 @@ export function Update({ versions, reload, nodes, site, refusal }: {
 }) {
   const [saving, setSaving] = useState(false)
   if (!versions) return null
-  const outdated = outdatedAgents(nodes, versions.agent_latest)
-  const offline = outdated.filter((n) => !n.online).length
+  // The two agent lines are numbered apart, so each is compared with the
+  // version published for its own line.
+  const { macos, linux } = byPlatform(nodes)
+  const linuxOutdated = outdatedAgents(linux, versions.agent_latest)
+  const macosOutdated = outdatedAgents(macos, versions.agent_latest_macos)
   const upgrade = refusal ? "" : upgradeCommand(site)
-  const unreachable = !versions.hub_latest && !versions.agent_latest
+  const unreachable = !versions.hub_latest && !versions.agent_latest && !versions.agent_latest_macos
 
   // Applied on the spot: one switch, and the navigation changes with it.
   async function setNotice(on: boolean) {
@@ -100,10 +176,11 @@ export function Update({ versions, reload, nodes, site, refusal }: {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-sm font-medium">hub</h3>
           <div className="flex items-center gap-3">
+            <span className="text-xs text-muted-foreground">上游 monitor 最新</span>
             <VersionPair current={versions.hub} latest={versions.hub_latest} />
             {behind(versions.hub, versions.hub_latest) && (
               <Button size="sm" variant="ghost" asChild>
-                <a href={releaseUrl("monitor", versions.hub_latest)} target="_blank" rel="noreferrer">
+                <a href={releaseUrl("monitor-probe/monitor", versions.hub_latest)} target="_blank" rel="noreferrer">
                   发布说明
                 </a>
               </Button>
@@ -112,83 +189,45 @@ export function Update({ versions, reload, nodes, site, refusal }: {
         </div>
       </Card>
 
-      <Card className="gap-4 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-sm font-medium">agent</h3>
-          <span className="text-xs text-muted-foreground">
-            {versions.agent_latest
-              ? outdated.length
-                ? <>最新 v{versions.agent_latest} · <span className="font-medium text-foreground">{outdated.length} 台待升级</span></>
-                : `全部已是最新 v${versions.agent_latest}`
-              : "查不到版本"}
-          </span>
-        </div>
-        {/* Also where the lookup failed: the command does not depend on it, and a
-            hub that fetches agents through the GitHub proxy cannot read tags. */}
-        {(outdated.length > 0 || !versions.agent_latest) && (
-          <>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              以 root 在每台机器上执行一次。不含凭证，沿用机器上已有的设置，不会新建节点。
-            </p>
-            {upgrade ? (
-              <>
-                <Command>{upgrade}</Command>
-                <div className="flex flex-wrap gap-2">
-                  <Button size="sm" variant="secondary" onClick={() => copy(upgrade)}>
-                    <Copy className="size-4" /> 复制命令
-                  </Button>
-                  {versions.agent_latest && (
-                    <Button size="sm" variant="ghost" asChild>
-                      <a href={releaseUrl("agent", versions.agent_latest)} target="_blank" rel="noreferrer">
-                        发布说明
-                      </a>
-                    </Button>
-                  )}
-                  <Button size="sm" variant="ghost" asChild>
-                    <a href="https://monitor-document.pages.dev/install/batch" target="_blank" rel="noreferrer">
-                      批量升级的做法
-                    </a>
-                  </Button>
-                </div>
-              </>
-            ) : (
-              <p className="text-xs text-muted-foreground">{refusal}</p>
-            )}
-            {/* Collapsed until asked for, grouped by version, and bounded in height
-                once open, so any number of nodes stays one line on the page. */}
-            {outdated.length > 0 && (
-              <details className="group border-t pt-3">
-                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-md text-xs text-muted-foreground outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden">
-                  <span className="flex items-center gap-1.5">
-                    <ChevronRight className="size-4 transition-transform group-open:rotate-90" />
-                    待升级的节点
-                  </span>
-                  {offline > 0 && <span>其中 {offline} 台离线</span>}
-                </summary>
-                <div className="mt-3 max-h-60 space-y-3 overflow-auto">
-                  {byVersion(outdated).map(([version, group]) => (
-                    <div key={version} className="space-y-1.5">
-                      <div className="text-xs text-muted-foreground">v{version} · {group.length} 台</div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {group.map((n) => (
-                          <Badge
-                            key={n.id}
-                            variant="secondary"
-                            className={`font-normal ${n.online ? "" : "opacity-50"}`}
-                            title={n.online ? undefined : "离线"}
-                          >
-                            {n.name}
-                          </Badge>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </details>
-            )}
-          </>
-        )}
-      </Card>
+      <AgentCard
+        title="agent · Linux"
+        latest={versions.agent_latest}
+        nodes={linuxOutdated}
+        repo="monitor-probe/agent"
+      />
+      <AgentCard
+        title="agent · macOS"
+        latest={versions.agent_latest_macos}
+        nodes={macosOutdated}
+        repo="plutolujh/monitor-macOS"
+      />
+
+      {/* The command is the same for both lines -- the installer works out the
+          platform itself -- so it is offered once, under them. */}
+      {(linuxOutdated.length > 0 || macosOutdated.length > 0 || !versions.agent_latest || !versions.agent_latest_macos) && (
+        <Card className="gap-4 p-5">
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            以 root 在每台机器上执行一次。不含凭证，沿用机器上已有的设置，不会新建节点。
+          </p>
+          {upgrade ? (
+            <>
+              <Command>{upgrade}</Command>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="secondary" onClick={() => copy(upgrade)}>
+                  <Copy className="size-4" /> 复制命令
+                </Button>
+                <Button size="sm" variant="ghost" asChild>
+                  <a href="https://monitor-document.pages.dev/install/batch" target="_blank" rel="noreferrer">
+                    批量升级的做法
+                  </a>
+                </Button>
+              </div>
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground">{refusal}</p>
+          )}
+        </Card>
+      )}
 
       <OptionRow
         title="更新提醒"

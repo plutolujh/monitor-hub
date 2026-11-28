@@ -2,7 +2,7 @@ import { ArrowUpCircle, Bell, Database, Palette, Radio, Server, Settings, Shield
 import { useEffect, useRef } from "react"
 
 import { HubVersion } from "@/components/common"
-import { behind, type Node, outdatedAgents, type Versions } from "@/lib/api"
+import { behind, byPlatform, type Node, outdatedAgents, type Versions } from "@/lib/api"
 import { Data } from "@/pages/Data"
 import { Nodes } from "@/pages/Nodes"
 import { Notify } from "@/pages/Notify"
@@ -61,10 +61,14 @@ export function Admin({
     }
   }, [path])
   // One dot for both; the page separates them. Absent when switched off on that
-  // page, or when the lookup failed and the page has nothing to say.
+  // page, or when the lookup failed and the page has nothing to say. Each
+  // agent line is compared with the version published for it.
+  const { macos, linux } = byPlatform(nodes)
   const updates =
     !!versions?.notice
-    && (behind(versions.hub, versions.hub_latest) || outdatedAgents(nodes, versions.agent_latest).length > 0)
+    && (behind(versions.hub, versions.hub_latest)
+      || outdatedAgents(linux, versions.agent_latest).length > 0
+      || outdatedAgents(macos, versions.agent_latest_macos).length > 0)
   return (
     <div className="flex flex-col gap-6 md:flex-row">
       <nav ref={navRef} className="flex gap-1 overflow-x-auto md:w-44 md:shrink-0 md:flex-col md:overflow-visible">
