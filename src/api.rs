@@ -207,7 +207,11 @@ fn addresses<'a>(
 /// is not behind the Linux agent's 1.2.4. The node's own `os` says which
 /// line it is on.
 fn agent_platform(os: &str) -> &'static str {
-    if os.starts_with("macOS") { "macos" } else { "linux" }
+    if os.starts_with("macOS") {
+        "macos"
+    } else {
+        "linux"
+    }
 }
 
 /// One node as the UI consumes it: stored config, live metrics and the hub's
@@ -1890,12 +1894,16 @@ pub async fn versions(_: Admin, State(app): State<Shared>) -> Json<Value> {
     } else {
         // Both at once: one round trip of latency rather than two, and neither
         // lookup depends on the other.
-        let (hub, agent) =
-            tokio::join!(latest_tag(&app, crate::HUB_REPO), latest_tag(&app, crate::AGENT_REPO));
+        let (hub, agent, agent_macos) = tokio::join!(
+            latest_tag(&app, crate::HUB_REPO),
+            latest_tag(&app, crate::AGENT_REPO),
+            latest_tag(&app, crate::MACOS_AGENT_REPO),
+        );
         let read = crate::Releases {
             read_at: Utc::now().timestamp(),
             hub: hub.unwrap_or_default(),
             agent: agent.unwrap_or_default(),
+            agent_macos: agent_macos.unwrap_or_default(),
         };
         *app.releases.lock().unwrap_or_else(|e| e.into_inner()) = read.clone();
         read
@@ -1907,6 +1915,10 @@ pub async fn versions(_: Admin, State(app): State<Shared>) -> Json<Value> {
         // github.com is a supported deployment, not a fault to report.
         "hub_latest": latest.hub,
         "agent_latest": latest.agent,
+        // The macOS agent's own line: its versions are numbered apart from
+        // the Linux one's, so a macOS node is compared with this and not
+        // with the one above.
+        "agent_latest_macos": latest.agent_macos,
         // Whether the navigation marks an update. It governs the mark alone: the
         // lookup runs either way, so the update page still answers when opened.
         "notice": app.db.get("update_notice").as_deref() != Some("off"),
@@ -1917,8 +1929,11 @@ pub async fn versions(_: Admin, State(app): State<Shared>) -> Json<Value> {
 /// for [`RELEASES_RETRY`] instead, so a single unreachable moment does not hide
 /// an update for the rest of the day.
 fn fresh_enough(cached: &crate::Releases, now: i64) -> bool {
-    let holds =
-        if cached.hub.is_empty() || cached.agent.is_empty() { RELEASES_RETRY } else { RELEASES_FRESH };
+    let holds = if cached.hub.is_empty() || cached.agent.is_empty() || cached.agent_macos.is_empty() {
+        RELEASES_RETRY
+    } else {
+        RELEASES_FRESH
+    };
     // A negative age is a clock set back since the lookup, not a fresh one.
     cached.read_at != 0 && (0..holds).contains(&(now - cached.read_at))
 }
@@ -2451,19 +2466,24 @@ mod tests {
     #[test]
     fn a_release_lookup_is_held_for_six_hours_and_a_failed_one_for_ten_minutes() {
         let now = Utc::now().timestamp();
-        let read = |read_at, hub: &str, agent: &str| crate::Releases {
+        let read = |read_at, hub: &str, agent: &str, agent_macos: &str| crate::Releases {
             read_at,
             hub: hub.into(),
             agent: agent.into(),
+            agent_macos: agent_macos.into(),
         };
         assert!(!fresh_enough(&crate::Releases::default(), now), "nothing has been read yet");
-        assert!(fresh_enough(&read(now - 5 * 3600, "1.2.0", "1.1.0"), now));
-        assert!(!fresh_enough(&read(now - 7 * 3600, "1.2.0", "1.1.0"), now));
-        assert!(fresh_enough(&read(now - 300, "", ""), now), "a failure is held briefly");
-        assert!(!fresh_enough(&read(now - 1200, "1.2.0", ""), now), "half an answer is a failure");
+        assert!(fresh_enough(&read(now - 5 * 3600, "1.2.0", "1.1.0", "0.2.0"), now));
+        assert!(!fresh_enough(&read(now - 7 * 3600, "1.2.0", "1.1.0", "0.2.0"), now));
+        assert!(fresh_enough(&read(now - 300, "", "", ""), now), "a failure is held briefly");
+        assert!(!fresh_enough(&read(now - 1200, "1.2.0", "", "0.2.0"), now), "half an answer is a failure");
         assert!(
-            !fresh_enough(&read(now + 3600, "1.2.0", "1.1.0"), now),
+            !fresh_enough(&read(now + 3600, "1.2.0", "1.1.0", "0.2.0"), now),
             "read before the clock was set back"
+        );
+        assert!(
+            !fresh_enough(&read(now - 5 * 3600, "1.2.0", "1.1.0", ""), now),
+            "a missing line is read again soon"
         );
     }
 

@@ -95,6 +95,8 @@ pub struct Releases {
     /// Tags without their leading `v`, empty where the lookup failed.
     pub hub: String,
     pub agent: String,
+    /// The macOS agent's own line, numbered apart from the Linux one.
+    pub agent_macos: String,
 }
 
 impl App {
@@ -324,7 +326,7 @@ fn relayable(key: &[u8], binary: &[u8], signature: &[u8], arch: &str) -> bool {
 const MACOS_ARCHES: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
 
 /// The repository the macOS agent is released from.
-const MACOS_AGENT_REPO: &str = "plutolujh/monitor-macOS";
+pub const MACOS_AGENT_REPO: &str = "plutolujh/monitor-macOS";
 
 /// The key the macOS agent's release job signs each binary with (ed25519, the
 /// raw 32 bytes). A key of its own, because the macOS agent is not the
