@@ -1,7 +1,7 @@
 import { ArrowUpCircle, Bell, Database, Palette, Radio, Server, Settings, Shield } from "lucide-react"
 import { useEffect, useRef } from "react"
 
-import { behind, type Node, outdatedAgents } from "@/lib/api"
+import { behind, type Node, outdatedAgents, type Versions } from "@/lib/api"
 import { Data } from "@/pages/Data"
 import { Nodes } from "@/pages/Nodes"
 import { Notify } from "@/pages/Notify"
@@ -9,7 +9,7 @@ import { Ping } from "@/pages/Ping"
 import { Security } from "@/pages/Security"
 import { SettingsTab } from "@/pages/Settings"
 import { Themes } from "@/pages/Themes"
-import { Update, useVersions } from "@/pages/Update"
+import { Update } from "@/pages/Update"
 
 // Each area is its own route rather than a tab, so a page can be linked to and a
 // reload returns to the same section.
@@ -32,6 +32,8 @@ export function Admin({
   site,
   refusal,
   reloadMe,
+  versions,
+  reload,
 }: {
   path: string
   go: (to: string) => void
@@ -40,8 +42,9 @@ export function Admin({
   site: string
   refusal: string
   reloadMe: () => void
+  versions: Versions | null
+  reload: () => void
 }) {
-  const { versions, reload } = useVersions()
   // Below `md` the sections are one scrolling row about twice the width of a
   // phone, so a page opened directly would otherwise have its button out of
   // view. Only the row scrolls, never the window.

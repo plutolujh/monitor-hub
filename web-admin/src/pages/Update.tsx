@@ -19,9 +19,12 @@ import { upgradeCommand } from "@/lib/commands"
  * A hub that cannot reach github.com answers with empty latest fields, which
  * render as no update rather than as an error.
  */
-export function useVersions() {
+export function useVersions(enabled = true) {
   const [versions, setVersions] = useState<Versions | null>(null)
-  const load = useCallback(() => api<Versions>("/version").then(setVersions).catch(() => {}), [])
+  const load = useCallback(() => {
+    if (!enabled) return
+    api<Versions>("/version").then(setVersions).catch(() => {})
+  }, [enabled])
   useEffect(() => { load() }, [load])
   return { versions, reload: load }
 }

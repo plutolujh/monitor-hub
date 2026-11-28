@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { api, provisionRefusal, useNodes } from "@/lib/api"
+import { useVersions } from "@/pages/Update"
 
 type Me = { authed: boolean; github: boolean; site_name: string; public_page: boolean; site: string }
 
@@ -104,6 +105,10 @@ export default function App() {
   const [me, setMe] = useState<Me | null>(null)
   const [meError, setMeError] = useState("")
   const { nodes, admin, error, refresh } = useNodes()
+  // Read once here: the header shows the hub's version and the panel below
+  // compares nodes against the published ones. The route is admin-only, so it
+  // is not asked for before there is a session.
+  const { versions, reload: reloadVersions } = useVersions(!!me?.authed)
 
   const loadMe = useCallback(() => {
     return api<Me>("/me")
@@ -194,6 +199,8 @@ export default function App() {
               // Why this page cannot add nodes, measured by the rule the hub applies
               // to the `Origin` it receives; empty when it can.
               refusal={provisionRefusal(location.origin, me.site)}
+              versions={versions}
+              reload={reloadVersions}
               reloadMe={loadMe}
             />
           )}
