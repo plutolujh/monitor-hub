@@ -200,6 +200,16 @@ fn addresses<'a>(
     [exits[0]].into_iter().filter(|a| !a.is_empty()).map(|a| (a, "connection")).collect()
 }
 
+/// Which agent release line a node's version belongs to.
+///
+/// The macOS agent is released from its own repository and numbered on its
+/// own, so the two lines' versions are not comparable: a macOS node at 0.2.0
+/// is not behind the Linux agent's 1.2.4. The node's own `os` says which
+/// line it is on.
+fn agent_platform(os: &str) -> &'static str {
+    if os.starts_with("macOS") { "macos" } else { "linux" }
+}
+
 /// One node as the UI consumes it: stored config, live metrics and the hub's
 /// accumulated traffic in a single object.
 fn node_view(
@@ -258,6 +268,7 @@ fn node_view(
         "swap_total": live("swap_total", node.swap_total),
         "disk_total": live("disk_total", node.disk_total),
         "agent_version": node.agent_version,
+        "agent_platform": agent_platform(&node.os),
         "price": node.price,
         "currency": node.currency,
         "billing_cycle": node.billing_cycle,
@@ -4416,5 +4427,16 @@ mod tests {
         assert_eq!(read(StatusCode::NOT_FOUND.into_response()).await, "请求的内容不存在");
         assert_eq!(read(StatusCode::BAD_GATEWAY.into_response()).await, INTERNAL);
         assert_eq!(read(bad("请填写节点名称")).await, "请填写节点名称");
+    }
+    /// A macOS node's version belongs to the macOS agent's line, whose numbers
+    /// run apart from the Linux one: a macOS node at 0.2.0 is not behind the
+    /// Linux agent's 1.2.4. The node's own `os` says which line it is on.
+    #[test]
+    fn a_macos_node_is_on_the_macos_line() {
+        assert_eq!(agent_platform("macOS 15.3"), "macos");
+        assert_eq!(agent_platform("macOS"), "macos");
+        assert_eq!(agent_platform("Ubuntu 24.04"), "linux");
+        assert_eq!(agent_platform("Debian GNU/Linux 12"), "linux");
+        assert_eq!(agent_platform(""), "linux");
     }
 }
