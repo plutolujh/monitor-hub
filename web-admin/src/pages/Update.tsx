@@ -81,21 +81,21 @@ function AgentCard({ title, latest, nodes, repo }: {
           {latest
             ? nodes.length
               ? <>最新 v{latest} · <span className="font-medium text-foreground">{nodes.length} 台待升级</span></>
-              : `全部已是最新 v{latest}`
+              : `全部已是最新 v${latest}`
             : "查不到版本"}
         </span>
       </div>
+      {latest && (
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="ghost" asChild>
+            <a href={releaseUrl(repo, latest)} target="_blank" rel="noreferrer">
+              发布说明
+            </a>
+          </Button>
+        </div>
+      )}
       {nodes.length > 0 && (
         <>
-          <div className="flex flex-wrap gap-2">
-            {latest && (
-              <Button size="sm" variant="ghost" asChild>
-                <a href={releaseUrl(repo, latest)} target="_blank" rel="noreferrer">
-                  发布说明
-                </a>
-              </Button>
-            )}
-          </div>
           {/* Collapsed until asked for, grouped by version, and bounded in height
               once open, so any number of nodes stays one line on the page. */}
           <details className="group border-t pt-3">
